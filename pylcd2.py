@@ -96,10 +96,10 @@ class lcd:
     # put string function
     def lcd_puts(self, string, line):
         if len(string) > self.LCD_WIDTH:
-            while len(string) > 5:
+            while len(string) > 10:
                 self.lcd_string(string[:self.LCD_WIDTH], line)
                 string = string[1:]
-                time.sleep(0.4)
+                time.sleep(0.3)
         else:
             self.lcd_string(string, line)
 

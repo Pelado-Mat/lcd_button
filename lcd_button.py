@@ -3,7 +3,7 @@
 # This plugin required python pylcd2.py library
 
 
-from threading import Thread, RLock
+from threading import Thread
 from Queue import Queue
 from random import randint
 import json
@@ -16,18 +16,19 @@ import gv  # Get access to sip's settings
 from urls import urls  # Get access to sip's URLs
 from sip import template_render
 from webpages import ProtectedPage
-from helpers import uptime, get_ip, get_cpu_temp, get_rpi_revision
+from helpers import uptime, get_ip, get_cpu_temp, get_rpi_revision, stop_stations, set_output
 from blinker import signal
 import pylcd2
-
+import Adafruit_GPIO.GPIO as GPIO
+import OneButton
 
 # Add a new url to open the data entry page.
-urls.extend(['/lcd', 'plugins.lcd_adj.settings',
-             '/lcdj', 'plugins.lcd_adj.settings_json',
-             '/lcda', 'plugins.lcd_adj.update'])
+urls.extend(['/lcd-button', 'plugins.lcd_button.settings',
+             '/lcd-buttonj', 'plugins.lcd_button.settings_json',
+             '/ulcd-but', 'plugins.lcd_button.update'])
 
 # Add this plugin to the home page plugins menu
-gv.plugin_menu.append(['LCD Settings', '/lcd'])
+gv.plugin_menu.append(['LCD-Button Settings', '/lcd-button'])
 
 ################################################################################
 # Main function loop:                                                          #
@@ -40,18 +41,36 @@ class LCDSender(Thread):
         self.daemon = True
         self.status = ''
         self._m_queue = queue
-
+        self._text_shift = 0
+        self._lcd = None
+        self._manual_mode = False
         self._sleep_time = 0
+        self._but1 = None # Black
+        self._but2 = None # Red
+
+        self._params = self.get_lcd_parms()
+        self._but1 = OneButton.OneButton(gv.scontrol.board_gpio, self._params['but1_pin'],
+                                           activeLow = self._params['but1_NormalOpen']) # Black
+        self._but2 = OneButton.OneButton(gv.scontrol.board_gpio, self._params['but2_pin'],
+                                           activeLow = self._params['but2_NormalOpen']) # Red
+        self._lcd = pylcd2.lcd(self._params['lcd_adress'], 1 if get_rpi_revision() >= 2 else 0)
+        self._but1.attachClick(self._butClick)
+        self._but2.attachClick(self._butClick)
+
         self.start()
 
-
+    def _butClick(self,pin):
+        if pin == self._but1.pin:
+            if self._text_shift == 7:
+                self._text_shift = 0
+            else:
+                self._text_shift += 1
 
     def add_status(self, msg):
         if self.status:
             self.status += '\n' + msg
         else:
             self.status = msg
-        print msg
 
     def update(self):
         self._sleep_time = 0
@@ -62,83 +81,102 @@ class LCDSender(Thread):
             time.sleep(1)
             self._sleep_time -= 1
 
+    def set_manual_mode(self):
+        lcd = self._lcd
+        lcd.lcd_clear()
+        lcd.lcd_puts('{:^15}'.format("Activar Bomba Manualmente?"), 1)
+        lcd.lcd_puts('   SI  Cancelar', 2)
+        start_wait = time.time()
+        while ((time.time() - start_wait ) < 10) or \
+                (self._but2.lastState == OneButton.CLICK and (self._but2.lastChangeTime > start_wait)): # Wait 10 secs or cancel
+            self._but1.tick()
+            self._but2.tick()
+            if self._but1.lastState == OneButton.CLICK and (self._but1.lastChangeTime > start_wait):
+                self._manual_mode = True
+                lcd.lcd_clear()
+                lcd.lcd_puts('{:^15}'.format("Iniciando Bomba"), 1)
+                lcd.lcd_puts('{:^15}'.format("Manualmente"), 2)
+                time.sleep(2)
+                stop_stations()
+                gv.sd['mm'] = 0
+                gv.sd['en'] = 0
+                vals = [0] * len(gv.srvals)
+                vals[gv.sd['mas'] - 1] = 1 # Start Pump
+                gv.srvals = vals
+                set_output()
+                manual_master_start = time.time()
+                # now we wait to cancel with other double press
+                last_update = time.time()
+                while True:
+                    time.sleep(10/1000)
+                    self._but1.tick()
+                    self._but2.tick()
+                    if (time.time() - last_update) > 5:
+                        # Keep Forcing the current State!
+                        gv.sd['mm'] = 0
+                        gv.sd['en'] = 0
+                        vals = [0] * len(gv.srvals)
+                        vals[gv.sd['mas'] - 1] = 1
+                        gv.scontrol.stations = vals
+                        run_min = int((time.time() - manual_master_start)/60)
+                        run_sec = int((time.time() - manual_master_start)%60)
+                        lcd.lcd_clear()
+                        lcd.lcd_puts('{:^15}'.format("Cancelar Bomba Manual?"), 1)
+                        lcd.lcd_puts(' Cancel - {:^3}:{}'.format(run_min,run_sec), 2)
+                        last_update = time.time()
+                    if self._but1.lastState == OneButton.CLICK and self._but1.lastChangeTime > manual_master_start: # Cancel Manual Mode
+                        lcd.lcd_clear()
+                        lcd.lcd_puts('{:^15}'.format("Detentiendo Bomba"), 1)
+                        lcd.lcd_puts('{:^15}'.format("Modo Automatico"), 2)
+                        time.sleep(3)
+                        stop_stations()
+                        gv.srvals = [0] * len(gv.srvals)
+                        set_output()
+                        gv.sd['mm'] = 0
+                        gv.sd['en'] = 1
+                        break
+
+
 
     def run(self):
         time.sleep(randint(3, 10))  # Sleep some time to prevent printing before startup information
-        print "LCD plugin is active"
-        text_shift = 0
-
+        print "LCD Button plugin is active"
+        old_text_index = -1
+        last_update  = 0
+        self._params = self.get_lcd_parms()
         while True:
             try:
-                datalcd = get_lcd_options()                          # load data from file
-                if datalcd['use_lcd'] != 'off':                      # if LCD plugin is enabled
-                    if text_shift > 7:  # Print 0-7 messages to LCD
-                        text_shift = 0
-                        self.status = ''
+                now = time.time()
+                if not self._params['use_lcd'] :                      # if LCD plugin is disable
+                    self._sleep(5)
+                    continue
 
-                    self.get_LCD_print(text_shift)   # Print to LCD 16x2
-                    text_shift += 1  # Increment text_shift value
-
-                self._sleep(4)
+                self._but1.tick()
+                self._but2.tick()
+                if self._but1.isLongPressed() and self._but2.isLongPressed() and self._params['enable_manual_master']: # Double push!
+                    self.set_manual_mode()
+                if (now - self._but1.lastChangeTime) > 60: # Return displaying the default
+                    self._text_shift = 0
+                if old_text_index != self._text_shift or self._m_queue.qsize() > 0 or (now - last_update) > 2 : #Update every 2 seconds
+                    last_update = now
+                    old_text_index = self._text_shift
+                    self.get_LCD_print(self._text_shift)   # Print to LCD 16x2
+                time.sleep(5/1000) # 5 ms
 
             except Exception:
                 exc_type, exc_value, exc_traceback = sys.exc_info()
                 err_string = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
-                self.add_status('LCD plugin encountered error: ' + err_string)
+                self.add_status('LCD-Button plugin encountered error: ' + err_string)
                 self._sleep(60)
 
     def get_LCD_print(self, report):
-        """Print messages to LCD 16x2"""
-        datalcd = get_lcd_options()
-        adr = 0x20
-        if datalcd['adress'] == '0x20':  # range adress from PCF8574 or PCF 8574A
-            adr = 0x20
-        elif datalcd['adress'] == '0x21':
-            adr = 0x21
-        elif datalcd['adress'] == '0x22':
-            adr = 0x22
-        elif datalcd['adress'] == '0x23':
-            adr = 0x23
-        elif datalcd['adress'] == '0x24':
-            adr = 0x24
-        elif datalcd['adress'] == '0x25':
-            adr = 0x25
-        elif datalcd['adress'] == '0x26':
-            adr = 0x26
-        elif datalcd['adress'] == '0x27':
-            adr = 0x27
-        elif datalcd['adress'] == '0x38':
-            adr = 0x38
-        elif datalcd['adress'] == '0x39':
-            adr = 0x39
-        elif datalcd['adress'] == '0x3a':
-            adr = 0x3a
-        elif datalcd['adress'] == '0x3b':
-            adr = 0x3b
-        elif datalcd['adress'] == '0x3c':
-            adr = 0x3c
-        elif datalcd['adress'] == '0x3d':
-            adr = 0x3d
-        elif datalcd['adress'] == '0x3e':
-            adr = 0x3e
-        elif datalcd['adress'] == '0x3f':
-            adr = 0x3f
-        else:
-            self.status = ''
-            self.add_status('Error: Address is not range 0x20-0x27 or 0x38-0x3F!')
-            self._sleep(5)
-            return
-
-        lcd = pylcd2.lcd(adr, 1 if get_rpi_revision() >= 2 else 0)  # Address for PCF8574 = example 0x20, Bus Raspi = 1 (0 = 256MB, 1=512MB)
-        s = self._m_queue.qsize()
-
-        print "q size..........", str(s)
-
-        if s > 0:
+        lcd = self._lcd
+        if self._m_queue.qsize() > 0:
             lcd.lcd_clear()
             lcd.lcd_puts('{:^15}'.format("SIP - Messages"), 1)
             lcd.lcd_puts('{:^15}'.format(self._m_queue.get()), 2)
             self.add_status('SIP / new message')
+            time.sleep(2)
         elif report == 0:
             lcd.lcd_clear()
             lcd.lcd_puts('{:^15}'.format("SIP - status"), 1)
@@ -189,15 +227,48 @@ class LCDSender(Thread):
             lcd.lcd_puts(rain_sensor, 2)
             self.add_status('Rain sensor: / ' + rain_sensor)
 
+    def get_lcd_parms(self):
+        """Returns the data form file."""
+        datalcd = {
+            'use_lcd': False,
+            'enable_manual_master': False,
+            'lcd_adress': 0x27,
+            'status': self.status,
+            'but1_pin': 40,           #Red Button
+            'but1_NormalOpen': True,
+            'but2_pin': 38,         #Black Button
+            'but2_NormalOpen': False
+        }
+        try:
+            with open('./data/lcd_button.json', 'r') as f:  # Read the settings from file
+                file_data = json.load(f)
+            for key, value in file_data.iteritems():
+                if key in datalcd:
+                    datalcd[key] = value
+        except Exception:
+            pass
+
+        return datalcd
 
 message_queue = Queue()
 checker = LCDSender(message_queue)
 
+def get_lcd_options():
+    datalcd = checker.get_lcd_parms()
+    options = [
+            ["use_lcd",_("Enable the plugin"), "boolean", _("Enable the LCD and Button Plugin"), _("General"),datalcd['use_lcd']],
+            ["enable_manual_master",_("Enable Master Mode"), "boolean", _("Enable manually starting the master station from the button and LCD menu"), _("General"),datalcd['enable_manual_master']],
+            ["lcd_adress", _("i2c Address of the LCD"),"hex",_("i2c Address of the LCD"),_("LCD"),datalcd['lcd_adress']],
+            ["but1_pin", _("Button 1 PIN"),"int",_("Button 1 PIN"),_("Buttons"),datalcd['but1_pin']],
+            ["but1_NormalOpen", _("Button 1 is Normal Open"),"boolean",_("Button 1 is Normal Open"),_("Buttons"),datalcd['but1_NormalOpen']],
+            ["but2_pin", _("Button 2 PIN"),"int",_("Button 2 GPIO"),_("Buttons"),datalcd['but2_pin']],
+            ["but2_NormalOpen", _("Button 2 is Normal Open"),"boolean",_("Button 2 is Normal Open"),_("Buttons"),datalcd['but2_NormalOpen']]
+        ]
+    return options
+
+
 # Connect to the signals
 def notify_zone_change(name, **kw):
-    print "Zone message!!!"
-    print "pon: ", str(gv.pon)
-    print "ps: ", str(gv.ps)
     pon = gv.pon
     if pon == 98:
         pgr = get_sip_status('Run-once - ')
@@ -223,19 +294,12 @@ def notify_zone_change(name, **kw):
             message_queue.put(pgr)
 
 
-def notify_program_toggled(name, **kw):
-    print "Prg Tog message!!!"
-    message_queue.put("A program has been toggled! and is a very long explanation of stupid stuff")
-
 def notify_restart(name, **kw):
-    print "Restart message!!!"
     message_queue.put("SYSTEM IS BEING RESTARTED!!!!!!")
 
 
 zones = signal('zone_change')
 zones.connect(notify_zone_change)
-program_toggled = signal('program_toggled')
-program_toggled.connect(notify_program_toggled)
 restart = signal('restart')
 restart.connect(notify_restart)
 
@@ -279,24 +343,6 @@ def get_sip_status(status = "", stations = []):
 
 
 
-def get_lcd_options():
-    """Returns the data form file."""
-    datalcd = {
-        'use_lcd': 'off',
-        'adress': '0x20',
-        'status': checker.status
-    }
-    try:
-        with open('./data/lcd_adj.json', 'r') as f:  # Read the settings from file
-            file_data = json.load(f)
-        for key, value in file_data.iteritems():
-            if key in datalcd:
-                datalcd[key] = value
-    except Exception:
-        pass
-
-    return datalcd
-
 ################################################################################
 # Web pages:                                                                   #
 ################################################################################
@@ -306,7 +352,7 @@ class settings(ProtectedPage):
     """Load an html page for entering lcd adjustments."""
 
     def GET(self):
-        return template_render.lcd_adj(get_lcd_options())
+        return template_render.lcd_button(get_lcd_options())
 
 
 class settings_json(ProtectedPage):
@@ -319,13 +365,50 @@ class settings_json(ProtectedPage):
 
 
 class update(ProtectedPage):
-    """Save user input to lcd_adj.json file."""
+    """Save user input to lcd_button.json file."""
 
     def GET(self):
         qdict = web.input()
-        if 'use_lcd' not in qdict:
-            qdict['use_lcd'] = 'off'
-        with open('./data/lcd_adj.json', 'w') as f:  # write the settings to file
-            json.dump(qdict, f)
+
+        r = {}
+        for opt in get_lcd_options():
+            p = opt[0]
+            datatype = opt[2]
+            if datatype == 'int':
+                value = qdict['o' + p]
+                value = int(value)
+            elif datatype == 'hex':
+                value = qdict['o' + p]
+                value = int(value,16)
+            elif datatype == 'array':
+                # can be a string or int array
+                value = qdict['o' + p]
+                l = []
+                for v in [x.strip() for x in value.split(',')]:
+                    if v.isdigit():
+                        l.append(int(v))
+                    else:
+                        l.append(v)
+                value = l
+            elif datatype == 'boolean':
+                if qdict.has_key('o' + p):
+                    value = qdict['o' + p]
+                    if value == 'on':
+                        value = True
+                    else:
+                        value = False
+                else:
+                    value = False
+            elif datatype == "textarea":
+                continue
+            else:
+                value = qdict['o' + p]
+
+            r[p] = value
+
+
+        with open('./data/lcd_button.json', 'w') as f:  # write the settings to file
+            json.dump(r, f)
+
         checker.update()
         raise web.seeother('/')

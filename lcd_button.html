@@ -1,54 +1,87 @@
 $def with(m_vals)
 
-$var title: OpenSprinkler Pi LCD settings
+$var title: SIP LCD-Button settings
 $var page: plugins
+
+$code:
+	opts = m_vals
+	languages = i18n.languages
+	langKeys = i18n.languages.keys()
+	langKeys.sort()
 
 <script>
     // Initialize behaviors
     jQuery(document).ready(function(){
 
-        jQuery("#cSubmit").click(function() {
-            jQuery("#pluginForm").submit();
-        });
-        jQuery("button#cCancel").click(function(){
-            window.location="/";
+        jQuery("button#tooltips").click(function(){
+            var visible = jQuery(this).text() == $:{json.dumps(_('Hide Tooltips'), ensure_ascii=False)};
+            jQuery(this).text(visible ? $:{json.dumps(_('Show Tooltips'), ensure_ascii=False)} : $:{json.dumps(_('Hide Tooltips'), ensure_ascii=False)});
+            jQuery(".tooltip").toggle();
         });
 
+
+        jQuery("button#cSubmit").click(function(){
+            jQuery("form[name='of']").submit();
+        });
+
+        jQuery("button#cCancel").click(function(){
+            window.location= baseUrl + "/";
+        });
+
+        jQuery(".collapsible h4").click(function(event){
+            jQuery(this).parent(".category").toggleClass("expanded").toggleClass("collapsed");
+        });
+
+
+        jQuery(".collapsible h4").first().parent(".category").toggleClass("expanded").toggleClass("collapsed");
+
     });
+
 </script>
 
 <div id="plugin">
-    <div class="title">LCD settings</div>
-    <p>This plugin sends data to I2C for LCD 16x2 char with PCF8574. Visit for more: www.pihrt.com/elektronika/258-moje-rapsberry-pi-i2c-lcd-16x2.</p>
-    <form id="pluginForm" action="/lcda" method="get">
-        <table class="optionList">
-            <tr>
-                <td style='text-transform: none;'>Use I2C LCD:</td>
-                <td>
-                    <input name='use_lcd' type='checkbox'${" checked" if m_vals['use_lcd'] == "on" else ""}>   
-                </td>
-            </tr>
-            <tr>
-                <td style='text-transform: none;'>Adress for PCF8574:</td>
-                <td>
-                    <input name='adress' type='text' value=$m_vals["adress"]> (default 0x20)
-                </td>
-            </tr>
-            <tr>
-                <td style='text-transform: none;'>Range address: </td>
-                <td>
-                    PCF8574 = 0x20-0x27, PCF8574A = 0x38-0x3F
-                </td>
-            </tr>
-            <tr>
-                <td style='text-transform: none;'>Status:</td>
-                <td>
-                    <textarea style="font-family: monospace;" rows="7" cols="35" readonly>$m_vals['status']</textarea>
-                </td>
-            </tr>
-        </table>
+    <div class="title">LCD-Button settings</div>
+    <div clas="titlenote">This plugin sends data to I2C for LCD 16x2 char with PCF8574. And controls 2 buttons as a interface</div>
+    <button id="tooltips">$_('Show Tooltips')</button>
+    <form name="of" action="${app_path('/ulcd-but')}" method="get">
+    $code:
+        output = ""
+        oldcategory = ""
+        categoryCloser = ""
+        for opt in opts:
+            name = opt[0]
+            label = opt[1]
+            datatype = opt[2]
+            value = opt[5]
+            tooltip = opt[3]
+            category = opt[4]
+
+            if category != oldcategory:
+                output += categoryCloser + "<div class='category collapsible collapsed'><h4>" + category + "</h4>"
+                categoryCloser = "</div>"
+            oldcategory = category
+            output += "<div class='option' title='" + tooltip + "'><span class='label'>" + label + ":</span>\n"
+            if datatype == "boolean":
+                output += "<input name='o"  + name + "' type='checkbox' " + ("checked" if value>0 else "") + ">\n"
+            elif datatype == "string":
+                output += "<input name='o" + name + "' type='text' size='31' maxlength='31' value=\"" + value + "\">\n"
+            elif datatype == "password":
+                output += "<input name='" + name + "' type='password' size='31' maxlength='31'><span class='inputError' id='error" + name + "'></span>\n"
+            elif datatype == "int":
+                value = str(value)
+                output += "<input name='o" + name + "' type='text' size='31' maxlength='31' value=\"" + value + "\">\n"
+            elif datatype == "hex" :
+                value = str(hex(value))
+                output += "<input name='o" + name + "' type='text' size='31' maxlength='31' value=\"" + value + "\">\n"
+            elif datatype == "array":
+                value = ','.join(str(x) for x in value)
+                output += "<input name='o" + name + "' type='text' size='31' maxlength='100' value=\"" + value + "\">\n"
+
+            output += "<span class='tooltip'>" + tooltip + "</span>\n"
+            output += "</div>\n\n"
+        output += categoryCloser
+    $:{output}
     </form>
-<p>Compatible with HD44780 LCD 16x2 controller.</p>
 </div>
 <div id="controls">
     <button id="cSubmit" class="submit"><b>Submit</b></button>
