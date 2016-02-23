@@ -22,6 +22,7 @@
 # THE SOFTWARE.
 
 import time
+from threading import Timer, RLock
 import Adafruit_GPIO.GPIO as GPIO
 
 UNPRESSED = 0

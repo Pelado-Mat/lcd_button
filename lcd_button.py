@@ -35,6 +35,8 @@ gv.plugin_menu.append(['LCD-Button Settings', '/lcd-button'])
 ################################################################################
 
 
+TICK_DELAY = 0.05
+
 class LCDSender(Thread):
     def __init__(self, queue):
         Thread.__init__(self)
@@ -108,7 +110,7 @@ class LCDSender(Thread):
                 # now we wait to cancel with other double press
                 last_update = time.time()
                 while True:
-                    time.sleep(10/1000)
+                    time.sleep(TICK_DELAY)
                     self._but1.tick()
                     self._but2.tick()
                     if (time.time() - last_update) > 5:
@@ -161,7 +163,7 @@ class LCDSender(Thread):
                     last_update = now
                     old_text_index = self._text_shift
                     self.get_LCD_print(self._text_shift)   # Print to LCD 16x2
-                time.sleep(5/1000) # 5 ms
+                time.sleep(TICK_DELAY)
 
             except Exception:
                 exc_type, exc_value, exc_traceback = sys.exc_info()
